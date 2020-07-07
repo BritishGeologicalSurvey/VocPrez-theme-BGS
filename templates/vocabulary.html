@@ -51,7 +51,11 @@
             <th>Collections:</th>
             <td>
               {% for collection in vocab.collections %}
+              {% if LOCAL_URLS -%}
+                <a href="{{ url_for('object') }}?uri={{ collection[0] }}">{{ collection[1] }}</a><br />
+                {% else %}
                 <a href="{{ collection[0] }}">{{ collection[1] }}</a><br />
+                {% endif -%}    
               {% endfor %}
             </td>
         </tr>
