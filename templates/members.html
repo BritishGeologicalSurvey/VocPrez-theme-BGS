@@ -1,16 +1,16 @@
 {% extends "page.html" %}
 
 {% block content %}
-    <div style="display:grid; grid-template-rows: 50px auto auto auto; grid-template-columns: 70% auto;">
+    <div style="display:grid; grid-template-rows: 75px auto auto auto; grid-template-columns: 70% auto;">
         <div style="grid-column: 1; grid-row: 1;">
             <h1>{{ label }}</h1>
         </div>
         <div style="grid-column: 1; grid-row: 2;">
             <dl>
-              <dt>IRI</dt>
+              <dt>URI</dt>
               <dd><strong><a href="{{ uri }}">{{ uri }}</a></strong></dd>
               {% if comment is not none %}
-              <dt>Description</dt>
+              <dt>Comment</dt>
               <dd>{{ comment|safe }}</dd>
               {% endif %}
               {% if parent_container_uri is not none %}
@@ -33,8 +33,8 @@
         </div>
         <div style="grid-column: 2; grid-row: 2;">
             <div class="altprofiles">
-              <h4>Alternates Profiles</h4>
-              <p>Different views of and formats:</p>
+              <h4>Alternate Profiles</h4>
+              <p>Different views &amp; formats:</p>
               <ul>
                 <li><a href="{{ url_for('vocabularies') }}?_profile=alt">Alternate Profiles</a></li>
               </ul>
