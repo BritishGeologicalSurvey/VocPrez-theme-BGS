@@ -1,9 +1,11 @@
+import sys
+sys.path.insert(0, '../../')
+sys.path.insert(0, '../vocprez/')
+
 import io
 import json
-import re
 import requests
-from rdflib import Graph, URIRef
-from vocprez import __version__
+from rdflib import Graph
 from flask import (
     Flask,
     Response,
@@ -16,20 +18,17 @@ from flask import (
 )
 from vocprez.model import *
 from vocprez import _config as config
-import markdown
 from vocprez.source.utils import cache_read, cache_write, sparql_query
 from pyldapi import Renderer, ContainerRenderer
 import datetime
 import logging
 import vocprez.source as source
+import markdown
+
 
 app = Flask(
     __name__, template_folder=config.TEMPLATES_DIR, static_folder=config.STATIC_DIR
 )
-
-
-class VbException(Exception):
-    pass
 
 
 @app.before_request
@@ -64,12 +63,41 @@ def before_request():
 @app.context_processor
 def context_processor():
     """
-    A set of global variables available to 'globally' for jinja templates.
+    A set of variables available globally for all Jinja templates.
     :return: A dictionary of variables
     :rtype: dict
     """
+
+    MEDIATYPE_NAMES = {
+        "text/html": "HTML",
+        "application/json": "JSON",
+        "text/turtle": "Turtle",
+        "application/rdf+xml": "RDX/XML",
+        "application/ld+json": "JSON-LD",
+        "text/n3": "Notation-3",
+        "application/n-triples": "N-Triples",
+    }
+
+    STATUSES = {
+        "http://www.opengis.net/def/status/accepted": "accepted",
+        "http://www.opengis.net/def/status/deprecated": "deprecated",
+        "http://www.opengis.net/def/status/experimental": "experimental",
+        "http://www.opengis.net/def/status/invalid": "invalid",
+        "http://www.opengis.net/def/status/notAccepted": "notAccepted",
+        "http://www.opengis.net/def/status/reserved": "reserved",
+        "http://www.opengis.net/def/status/retired": "retired",
+        "http://www.opengis.net/def/status/stable": "stable",
+        "http://www.opengis.net/def/status/submitted": "submitted",
+        "http://www.opengis.net/def/status/superseded": "superseded",
+        "http://www.opengis.net/def/status/valid": "valid",
+    }
     import vocprez.source.utils as u
-    return dict(utils=u)
+    return dict(
+        utils=u,
+        LOCAL_URLS=config.LOCAL_URLS,
+        MEDIATYPE_NAMES=MEDIATYPE_NAMES,
+        STATUSES=STATUSES
+    )
 
 
 @app.context_processor
@@ -81,15 +109,10 @@ def inject_date():
 def index():
     return render_template(
         "index.html",
-        version=__version__,
-        title="GA VocPrez",
-        navs={},
-        config=config,
-        voc_key=get_a_vocab_source_key(),
     )
 
 
-@app.route("/vocabulary/")
+@app.route("/vocab/")
 def vocabularies():
     page = (
         int(request.values.get("page")) if request.values.get("page") is not None else 1
@@ -105,7 +128,7 @@ def vocabularies():
     # get this instance's list of vocabs
     vocabs = []  # local copy (to this request) for sorting
     for k, voc in g.VOCABS.items():
-        vocabs.append((url_for("vocabulary", vocab_id=k), voc.title))
+        vocabs.append((url_for("object", uri=k), voc.title))
     vocabs.sort(key=lambda tup: tup[1])
     total = len(g.VOCABS.items())
     #
@@ -123,24 +146,12 @@ def vocabularies():
     start = (page - 1) * per_page
     end = start + per_page
     vocabs = vocabs[start:end]
-    #
-    # # render the list of vocabs
-    # return SkosRegisterRenderer(
-    #     request,
-    #     [],
-    #     vocabs,
-    #     "Vocabularies",
-    #     total,
-    #     search_query=query,
-    #     search_enabled=True,
-    #     vocabulary_url=["http://www.w3.org/2004/02/skos/core#ConceptScheme"],
-    # ).render()
 
     return ContainerRenderer(
         request,
-        'https://pid.geoscience.gov.au/def/voc/',
-        'Vocabularies',
-        'Vocabularies published by Geoscience Australia from multiple sources',
+        config.VOCS_URI if config.VOCS_URI is not None else url_for("vocabularies"),
+        config.VOCS_TITLE if config.VOCS_TITLE is not None else 'Vocabularies',
+        config.VOCS_DESC if config.VOCS_DESC is not None else None,
         None,
         None,
         vocabs,
@@ -148,80 +159,172 @@ def vocabularies():
     ).render()
 
 
-@app.route("/vocabulary/<string:vocab_id>/")
+def translate_vocab_id_to_vocab_uri(vocab_id):
+    vocab_ids = {}
+
+    for x in g.VOCABS.keys():
+        vocab_ids[x.split("#")[-1].split("/")[-1].lower()] = x
+
+    if vocab_id in vocab_ids.keys():
+        return vocab_ids[vocab_id]
+    else:
+        return None
+
+
+def make_vocab_id_list():
+    return [x.split("#")[-1].split("/")[-1].lower() for x in g.VOCABS.keys()]
+
+
+@app.route("/vocab/<string:vocab_id>/")
 def vocabulary(vocab_id):
-    # check the vocab id is valid
-    if vocab_id not in g.VOCABS.keys():
-        return render_invalid_vocab_id_response()
+    vocab_uri = translate_vocab_id_to_vocab_uri(vocab_id)
 
-    # get vocab details using appropriate source handler
-    try:
-        vocab = getattr(source, g.VOCABS[vocab_id].data_source)(vocab_id, request, language=request.values.get("lang")).get_vocabulary()
-    except VbException as e:
-        return render_vb_exception_response(e)
+    if vocab_uri is None:
+        return return_vocrez_error(
+            "vocab_id not valid",
+            400,
+            markdown.markdown(
+                "The 'vocab_id' you supplied could not be translated to a valid vocab's URI. Valid vocab_ids are:\n\n"                
+                "{}".format("".join(["* [{id}]({uri})   \n".format(**{"uri": url_for("vocabulary", vocab_id=x), "id": x}) for x in make_vocab_id_list()]))
+                # "{}".format(",".join(make_vocab_id_list()))
+            ),
+        )
 
-    return VocabularyRenderer(request, vocab).render()
+    return return_vocab(vocab_uri)
 
 
-@app.route("/vocabulary/<vocab_id>/concept/")
+@app.route("/vocab/<vocab_id>/concept/")
 def concepts(vocab_id):
-    language = request.values.get("lang") or config.DEFAULT_LANGUAGE
+    return "/concept/"
 
-    if vocab_id not in g.VOCABS.keys():
-        return render_invalid_vocab_id_response()
+    # check the vocab id is valid
+    vocab_ids = {}
+    for x in g.VOCABS.keys():
+        vocab_ids[x.split("#")[-1].split("/")[-1]] = x
 
-    vocab_source = getattr(source, g.VOCABS[vocab_id].data_source)(vocab_id, request, language=config.DEFAULT_LANGUAGE)
-    concepts = vocab_source.list_concepts()
-    concepts.sort(key=lambda x: x["title"])
-    total = len(concepts)
+    if vocab_id not in vocab_ids.keys():
+        msg = "The vocabulary ID that was supplied was not known. " \
+              "It must be one of these: {}".format(", ".join(vocab_ids.keys()))
+        return Response(
+            msg,
+            status=400,
+            mimetype="text/plain"
+        )
 
-    # Search
-    query = request.values.get("search")
-    results = []
-    if query:
-        for m in match(concepts, query):
-            results.append(m)
-        concepts[:] = results
-        concepts.sort(key=lambda x: x["title"])
+    try:
+        vocab_source = getattr(source, g.VOCABS[vocab_id].source)(vocab_id, request)
+        concepts = vocab_source.list_concepts()
+        # concepts.sort(key=lambda x: x["prefLabel"]) -- sort not needed when receiving pre-sorted tuples
         total = len(concepts)
 
-    page = (
-        int(request.values.get("page")) if request.values.get("page") is not None else 1
-    )
-    per_page = (
-        int(request.values.get("per_page"))
-        if request.values.get("per_page") is not None
-        else 20
-    )
-    start = (page - 1) * per_page
-    end = start + per_page
-    concepts = concepts[start:end]
+        page = (
+            int(request.values.get("page")) if request.values.get("page") is not None else 1
+        )
+        per_page = (
+            int(request.values.get("per_page"))
+            if request.values.get("per_page") is not None
+            else 20
+        )
+        start = (page - 1) * per_page
+        end = start + per_page
+        members = concepts[start:end]
+    except Exception as e:
+        return Response(
+            str(e),
+            status=500,
+            mimetype="text/plain"
+        )
 
-    test = SkosRegisterRenderer(
-        request=request,
-        navs=[],
-        members=concepts,
-        register_item_type_string=g.VOCABS[vocab_id].title + " concepts",
-        total=total,
-        search_enabled=True,
-        search_query=query,
-        vocabulary_url=[request.url_root + "vocabulary/" + vocab_id],
-        vocab_id=vocab_id,
-    )
-    return test.render()
+    return ContainerRenderer(
+        request,
+        url_for("concepts", vocab_id=vocab_id),
+        "All Concepts",
+        'All Concepts within Vocab {}'.format(vocab_id),
+        None,
+        None,
+        members,
+        total
+    ).render()
 
 
 @app.route("/collection/")
 def collections():
     return render_template(
-        "register.html",
-        version=__version__,
+        "members.html",
         title="Collections",
         register_class="Collections",
-        navs={}
     )
 
 
+def return_vocab(uri):
+    if uri in g.VOCABS.keys():
+        # get vocab details using appropriate source handler
+        vocab = getattr(source, g.VOCABS[uri].source) \
+            (uri, request, language=request.values.get("lang")).get_vocabulary()
+        return VocabularyRenderer(request, vocab).render()
+    else:
+        return None
+
+
+# TODO: make this use the main cache directly, not via Vocab's source
+def return_collection_or_concept_from_main_cache(uri):
+    q = """
+        PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+
+        SELECT DISTINCT *
+        WHERE {{ 
+            GRAPH ?g {{
+                <{uri}> a ?c .
+                OPTIONAL {{
+                    <{uri}> skos:inScheme ?cs .
+                }}
+
+                BIND (COALESCE(?cs, ?g) AS ?x)
+            }}                
+        }}
+        """.format(uri=uri)
+    for r in sparql_query(q, sparql_username=config.SPARQL_USERNAME, sparql_password=config.SPARQL_PASSWORD):
+        if r["c"]["value"] in source.Source.VOC_TYPES:
+            # if we find it and it's of a known class, return it
+            # since, for a Concept or a Collection, we know the relevant vocab as vocab ==  CS ==  graph
+            # in VocPrez's models of a vocabs
+            vocab_uri = r["x"]["value"]
+            if r["c"]["value"] == "http://www.w3.org/2004/02/skos/core#Collection":
+                try:
+                    c = source.Source(vocab_uri, request).get_collection(uri)
+                    return CollectionRenderer(request, c).render()
+                except:
+                    pass
+            elif r["c"]["value"] == "http://www.w3.org/2004/02/skos/core#Concept":
+                try:
+                    c = source.Source(vocab_uri, request).get_concept(uri)
+                    return ConceptRenderer(request, c).render()
+                except:
+                    pass
+    return None
+
+
+def return_collection_or_concept_from_vocab_source(vocab_uri, uri):
+    try:
+        c = getattr(source, g.VOCABS[vocab_uri].source) \
+            (vocab_uri, request, language=request.values.get("lang")).get_collection(uri)
+
+        return CollectionRenderer(request, c).render()
+    except:
+        pass
+
+    try:
+        c = getattr(source, g.VOCABS[vocab_uri].source) \
+            (vocab_uri, request, language=request.values.get("lang")).get_concept(uri)
+
+        return ConceptRenderer(request, c).render()
+    except:
+        pass
+
+    return None
+
+
+# TODO: review the logic in this function regarding use of uri, vocab_uri or uri & vocab_uri
 @app.route("/object")
 def object():
     """
@@ -229,58 +332,87 @@ def object():
     be they a Vocabulary, Concept Scheme, Collection or Concept. Only those 4 classes of object are supported for the
     moment.
 
-    An HTTP URI query string argument parameter 'vocab_id' must be supplied, indicating the vocab this object is within
+    An HTTP URI query string argument parameter 'vocab_uri' may be supplied, indicating the vocab this object is within
     An HTTP URI query string argument parameter 'uri' must be supplied, indicating the URI of the object being requested
 
     :return: A Flask Response object
     :rtype: :class:`flask.Response`
     """
-    language = request.values.get("lang") or config.DEFAULT_LANGUAGE
-    vocab_id = request.values.get("vocab_id")
+
     uri = request.values.get("uri")
-    _view = request.values.get("_view")
-    _format = request.values.get("_format")
+    vocab_uri = request.values.get("vocab_uri")
 
-    # check this vocab ID is known
-    if vocab_id not in g.VOCABS.keys():
-        return Response(
-            "The vocabulary ID you've supplied is not known. Must be one of:\n "
-            + "\n".join(g.VOCABS.keys()),
-            status=400,
-            mimetype="text/plain",
+    uri_is_empty = True if uri is None or uri == "" else False
+    vocab_uri_is_empty = True if vocab_uri is None or vocab_uri == "" else False
+
+    # must have a URI or Vocab URI supplied, for any scenario
+    if uri_is_empty and vocab_uri_is_empty:
+        return return_vocrez_error(
+            "Input Error",
+            400,
+            "A Query String Argument of 'uri' and/or 'vocab_uri' must be supplied for this endpoint"
         )
-
-    if uri is None:
-        return Response(
-            "A Query String Argument 'uri' must be supplied for this endpoint, "
-            "indicating an object within a vocabulary",
-            status=400,
-            mimetype="text/plain",
+    elif uri_is_empty and not vocab_uri_is_empty:
+        # we only have a vocab_uri, so it must be a vocab
+        v = return_vocab(vocab_uri)
+        if v is not None:
+            return v
+        # if we haven't returned already, the vocab_uri was unknown but that's all we have so error
+        return return_vocrez_error(
+            "vocab_uri error",
+            400,
+            markdown.markdown(
+                "You have supplied an unknown 'vocab_uri'. If one is supplied, "
+                "it must be one of:\n\n"
+                "{}".format("".join(["* " + str(x) + "   \n" for x in g.VOCABS.keys()]))
+            ),
         )
+    elif not uri_is_empty and vocab_uri_is_empty:
+        # we have no vocab_uri so we must be able to return a result from the main cache or error
+        # if it's a vocab, return that
+        v = return_vocab(uri)
+        if v is not None:
+            return v
+        # if we get here, it's not a vocab so try to return a Collection or Concept from the main cache
+        c = return_collection_or_concept_from_main_cache(uri)
+        if c is not None:
+            return c
+        # if we get here, it's neither a vocab nor a Concept of Collection so return error
+        return return_vocrez_error(
+            "Input Error",
+            400,
+            "The 'uri' you supplied is not known to this instance of VocPrez. You may consider supplying a 'vocab_uri' "
+            "parameter with that same 'uri' to see if VocPrez can use that vocab URI to look up information about "
+            "the 'uri' object' from a remote source."
+        )
+    else:  # both uri & vocab_uri are set
+        # look up URI at vocab_uri source. If not found, return error
 
-    # vocab_source = Source(vocab_id, request, language)
-    vocab_source = getattr(source, g.VOCABS[vocab_id].data_source)(vocab_id, request, language=config.DEFAULT_LANGUAGE)
+        # we have a vocab_uri, so it must be a real one
+        if vocab_uri not in g.VOCABS.keys():
+            return return_vocrez_error(
+                "Input Error",
+                400,
+                markdown.markdown(
+                    "You have supplied an unknown 'vocab_uri'. If one is supplied, "
+                    "it must be one of:\n\n"
+                    "{}".format("".join(["* " + str(x) + "   \n" for x in g.VOCABS.keys()]))
+                ),
+            )
 
-    try:
-        # TODO reuse object within if, rather than re-loading graph
-        c = vocab_source.get_object_class()
+        # the vocab_uri is valid so query that vocab's source for the object
+        # the uri is either a Concept or Collection.
+        c = return_collection_or_concept_from_vocab_source(vocab_uri, uri)
+        if c is not None:
+            return c
 
-        if c == "http://www.w3.org/2004/02/skos/core#Concept":
-            concept = vocab_source.get_concept()
-            return ConceptRenderer(request, concept).render()
-
-        elif c == "http://www.w3.org/2004/02/skos/core#ConceptScheme":
-            vocabulary = vocab_source.get_vocabulary()
-
-            return VocabularyRenderer(request, vocabulary).render()
-
-        elif c == "http://www.w3.org/2004/02/skos/core#Collection":
-            collection = vocab_source.get_collection(uri)
-            return CollectionRenderer(request, collection).render()
-        else:
-            return render_invalid_object_class_response(vocab_id, uri, c)
-    except VbException as e:
-        return render_vb_exception_response(e)
+        # if we get here, neither a Collection nor a Concept could be found at that vocab's source so error
+        return return_vocrez_error(
+            "Input Error",
+            400,
+            "You supplied a valid 'vocab_uri' but when VocPrez queried the relevant vocab, no information about the "
+            "object you identified with 'uri' was found.",
+        )
 
 
 @app.route("/about")
@@ -299,7 +431,6 @@ def about():
 
     return render_template(
         "about.html",
-        version=__version__,
         title="About",
         navs={},
         content=content
@@ -311,7 +442,6 @@ def about():
 def sparql():
     return render_template(
         "sparql.html",
-        version=__version__,
     )
 
 
@@ -576,29 +706,15 @@ def sparql_query2(query, format_mimetype="application/json"):
         raise e
 
 
-def render_invalid_vocab_id_response():
-    msg = (
-        """The vocabulary ID that was supplied was not known. It must be one of these: \n\n* """
-        + "\n* ".join(g.VOCABS.keys())
-    )
-    msg = Markup(markdown.markdown(msg))
+# TODO: use for all errors
+# TODO: allow conneg - at least text v. HTML
+def return_vocrez_error(title, status, message):
     return render_template(
         "error.html",
-        version=__version__,
-        title="Error - invalid vocab id",
-        heading="Invalid Vocab ID",
-        msg=msg,
-    )
-
-
-def render_vocprez_response(message):
-    return render_template(
-        "error.html",
-        version=__version__,
-        title="Error - invalid vocab id",
-        heading="Invalid Vocab ID",
-        msg=message,
-    )
+        title=title,
+        status=status,
+        msg=message
+    ), status
 
 
 def render_vb_exception_response(e):
@@ -612,7 +728,6 @@ def render_vb_exception_response(e):
         msg = Markup(markdown.markdown(msg))
     return render_template(
         "error.html",
-        version=__version__,
         title="Error",
         heading="VocBench Error",
         msg=msg
@@ -628,109 +743,10 @@ Instead, found **{}**.""".format(
     msg = Markup(markdown.markdown(msg))
     return render_template(
         "error.html",
-        version=__version__,
         title="Error - Object Class URI",
         heading="Concept Class Type Error",
         msg=msg,
     )
-
-
-def get_a_vocab_key():
-    """
-    Get the first key from the g.VOCABS dictionary.
-
-    :return: Key name
-    :rtype: str
-    """
-    try:
-        return next(iter(g.VOCABS))
-    except:
-        return None
-
-
-def get_a_vocab_source_key():
-    """
-    Get the first key from the config.VOCABS dictionary.
-
-    :return: Key name
-    :rtype: str
-    """
-    try:
-        return next(iter(g.VOCABS))
-    except:
-        return None
-
-
-def match(vocabs, query):
-    """
-    Generate a generator of vocabulary items that match the search query
-
-    :param vocabs: The vocabulary list of items.
-    :param query: The search query string.
-    :return: A generator of words that match the search query.
-    :rtype: generator
-    """
-    for word in vocabs:
-        if query.lower() in word.title.lower():
-            yield word
-
-
-def make_title(s):
-    # make title from URI
-    title = " ".join(s.split("#")[-1].split("/")[-1].split("_")).title()
-
-    # replace dashes and periods with whitespace
-    title = re.sub("[-.]+", " ", title).title()
-
-    return title
-
-
-def parse_markdown(s):
-    return markdown.markdown(s)
-
-
-def is_email(email):
-    """
-    Check if the email is a valid email.
-    :param email: The email to be tested.
-    :return: True if the email matches the static regular expression, else false.
-    :rtype: bool
-    """
-    pattern = r"[a-z0-9!#$%&'*+\/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+\/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
-    return True if re.search(pattern, email) is not None else False
-
-
-def strip_mailto(email):
-    return email[7:]
-
-
-def contains_mailto(email):
-    if email[:7] == "mailto:":
-        return True
-    return False
-
-
-def is_url(url):
-    """
-    Check if the url is a valid url.
-    :param url: The url to be tested.
-    :type url: str
-    :return: True if the url passes the validation, else false.
-    :rtype: bool
-    """
-    if isinstance(url, URIRef):
-        return True
-
-    pattern = re.compile(
-        r"^(?:http|ftp)s?://"  # http:// or https://
-        r"(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|"  # domain...
-        r"localhost|"  # localhost...
-        r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"  # ...or ip
-        r"(?::\d+)?"  # optional port
-        r"(?:/?|[/?]\S+)$",
-        re.IGNORECASE,
-    )
-    return True if re.search(pattern, url) is not None else False
 
 
 # run the Flask app
