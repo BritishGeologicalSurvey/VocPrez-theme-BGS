@@ -30,7 +30,7 @@
                             </p>
                             <p>
                                 <code>
-                                    <a href="{{ url_for('http://fuseki:3030/bgs/query') }}">{{ url_for('http://fuseki:3030/bgs/query')  }}</a>
+                                    <a href="{{ url_for('endpoint') }}">{{ url_for('endpoint')  }}</a>
                                 </code>
                             </p>
                             <p>
@@ -63,7 +63,7 @@ WHERE {
                     below, first create the query, URL-encode it, and lodge it like this:
                 </p>
                 <pre>
-{{ url_for('endpoint', _external=True) }}?query={YOUR_QUERY_URL_ENCODED}
+{{ url_for('endpoint') }}?query={YOUR_QUERY_URL_ENCODED}
                 </pre>
                 <p>
                     Enter your SPARQL query into this text box and click "URL Encode" to URL encode it. That will
