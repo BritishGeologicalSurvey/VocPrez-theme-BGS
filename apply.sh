@@ -1,6 +1,6 @@
 # replaces everything in vocprez/view/
 
 # replace styles
-cp -r ./VocPrez-theme-BGS/style ./VocPrez/vocprez/view/
-cp -r ./VocPrez-theme-BGS/templates ./VocPrez/vocprez/view/
-cp ./VocPrez-theme-BGS/README.md ./VocPrez/README.md
+cp -r $VP_THEME_HOME/style $VP_HOME/vocprez/view/
+cp -r $VP_THEME_HOME/templates $VP_HOME/vocprez/view/
+cp $VP_THEME_HOME/README.md $VP_HOME/README.md
